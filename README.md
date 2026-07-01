@@ -1,40 +1,46 @@
 # velero
 
 An MCP (Model Context Protocol) server, built with FastMCP and scaffolded via
-[kmcp](https://kagent.dev/docs/kmcp), that lets an agent trigger and audit
-Velero backups from natural-language status queries instead of someone
-hand-inspecting Velero CRs.
+[kmcp](https://kagent.dev/docs/kmcp), that turns RTO/RPO from a static
+promise into a measured, continuously-verified fact - full autonomy on the
+safe side (triggering backups, scoring them against policy), advisory-only
+on the destructive side (restoring).
 
-## Features
+## Tools
 
-- **Dynamic Tool Loading**: Tools are automatically discovered and loaded from `src/tools/`
-- **`trigger_backup` tool**: creates a `velero.io/v1` Backup object (the same
+- **`trigger_backup`**: creates a `velero.io/v1` Backup object (the same
   object `velero backup create` itself builds and submits), optionally waits
   for it to reach a terminal phase, then writes structured completion
   metadata - duration, resource counts, warning/error counts, the GitOps
   revision (Flux/Argo CD, best-effort), and the container images running in
   the backed-up namespaces - back onto the Backup object as an annotation.
-  This lets a later restore be checked for staleness against what's actually
-  running now, not just against clock time.
-- **In-cluster or out-of-cluster**: the Kubernetes client prefers in-cluster
-  ServiceAccount credentials and falls back to kubeconfig, so the server can
-  run inside the cluster it manages or on a dev machine pointed at a remote
-  cluster (see [Configuration](#configuration)).
-- **Configuration Management**: Tool-specific configuration via `kmcp.yaml`
-- **Fail-Fast**: Server won't start if any tool fails to load
+- **`list_backups`**: lists Backup objects, scores each against its
+  workload tier's RPO target (see [Policies](#policies)), and returns
+  `recommended_backup` - the newest Completed backup that meets RPO and
+  still matches what's actually running now (images + GitOps revision), not
+  just the newest by clock time.
+- **`restore_backup`**: **advisory by default.** Without `confirm=True` it
+  only returns a plan (the backup's phase/namespaces) and makes no cluster
+  changes. Only creates the `velero.io/v1` Restore object once a human (or
+  an agent explicitly instructed to) passes `confirm=True`. This is where
+  the "advisory-only on the destructive side" policy is enforced in the
+  tool itself, not just in documentation.
 
 ## Project Structure
 
 ```
 src/
 ├── tools/
-│   ├── trigger_backup.py  # Trigger a Velero backup + record metadata
-│   └── __init__.py        # Tool registry
+│   ├── trigger_backup.py   # Trigger a Velero backup + record metadata
+│   ├── list_backups.py     # List backups scored against RPO policy
+│   ├── restore_backup.py   # Restore from a picked backup (advisory unless confirmed)
+│   └── __init__.py         # Tool registry
 ├── core/
-│   ├── server.py          # Dynamic MCP server / tool discovery
+│   ├── server.py           # Dynamic MCP server / tool discovery
 │   ├── k8s.py              # Kubernetes client setup (in-cluster or kubeconfig)
-│   ├── velero.py           # Velero Backup CRD helpers
-│   └── utils.py             # Shared config/env utilities
+│   ├── velero.py           # Velero Backup/Restore CRD helpers
+│   ├── policy.py           # RPO/RTO tier policy resolution
+│   └── utils.py            # Shared config/env utilities
 └── main.py                 # Entry point
 kmcp.yaml                   # Configuration file
 tests/                      # Unit tests (mocked Kubernetes client, no cluster required)
@@ -42,7 +48,10 @@ tests/                      # Unit tests (mocked Kubernetes client, no cluster r
 
 ## Configuration
 
-`kmcp.yaml`:
+`kmcp.yaml`'s `tools:` section is validated by the `kmcp` CLI against a fixed
+schema - each entry needs `name`/`enabled`, and per-tool settings must live
+under a nested `config:` key (flat keys are silently dropped by the CLI and
+will fail `kmcp` commands with `tool name is required` if `name` is missing):
 
 ```yaml
 kubernetes:
@@ -50,9 +59,45 @@ kubernetes:
   context: ""
 tools:
   trigger_backup:
-    velero_namespace: velero      # namespace Velero (and its Backup CRs) run in
-    poll_interval_seconds: 5      # how often to poll Backup status while waiting
+    name: trigger_backup
+    enabled: true
+    config:
+      velero_namespace: velero      # namespace Velero (and its Backup CRs) run in
+      poll_interval_seconds: 5      # how often to poll status while waiting
+  list_backups:
+    name: list_backups
+    enabled: true
+    config:
+      velero_namespace: velero
+  restore_backup:
+    name: restore_backup
+    enabled: true
+    config:
+      velero_namespace: velero
+      poll_interval_seconds: 5
+policies:
+  default_tier: standard
+  tiers:
+    critical:
+      rpo_minutes: 60
+      rto_minutes: 15
+    standard:
+      rpo_minutes: 1440
+      rto_minutes: 240
+  # Map namespace -> tier name above. Namespaces not listed use default_tier.
+  namespace_tiers:
+    payments: critical
 ```
+
+### Policies
+
+`policies` is a plain, deterministic lookup table - no LLM reasoning needed
+for the RPO check itself. `list_backups` resolves a backup's tier as the
+*strictest* (lowest RPO) tier among its included namespaces, then compares
+the backup's age against that tier's `rpo_minutes`. `rto_minutes` is
+currently informational (surfaced per backup); it becomes a measured fact
+once a restore-drill tool feeds real restore durations back into this same
+metadata store - not built yet.
 
 ## Quick Start
 
@@ -125,26 +170,27 @@ local process:
 - **Command**: `uv`
 - **Arguments**: `run python src/main.py`
 
-From the Inspector you can list tools and invoke `trigger_backup` directly.
-With no cluster reachable, the tool call fails cleanly with a Kubernetes
-config error (`isError=True`) rather than crashing the server - that's the
-expected result when validating the tool wiring without a live cluster.
+From the Inspector you can list tools and invoke them directly. With no
+cluster reachable, a tool call fails cleanly with a Kubernetes config error
+(`isError=True`) rather than crashing the server - that's the expected
+result when validating tool wiring without a live cluster.
 
 ### End-to-end validation against a real cluster
 
-To actually exercise a backup, you need a cluster with Velero installed and
-a kubeconfig (or in-cluster ServiceAccount) that can reach it:
+You need a cluster with Velero installed and a kubeconfig (or in-cluster
+ServiceAccount) that can reach it:
 
 1. Point `kmcp.yaml`'s `kubernetes.context` at the target cluster, or rely on
    `KUBECONFIG` / the current context.
 2. Grant the identity running the server RBAC for: create/get/patch on
-   `backups.velero.io` in the `velero_namespace`; read on
+   `backups.velero.io` and `restores.velero.io` in the `velero_namespace`;
+   list/get on both across the namespace for `list_backups`; read on
    Deployments/StatefulSets/DaemonSets in any namespace you'll back up; and
    (optionally) read on `gitrepositories.source.toolkit.fluxcd.io` /
    `applications.argoproj.io` if you want GitOps revision detection.
-3. Call `trigger_backup` with `wait=true` and inspect the returned metadata,
-   or `kubectl get backup <name> -n velero -o jsonpath='{.metadata.annotations}'`
-   to see the annotation written back.
+3. Call `trigger_backup` with `wait=true`, then `list_backups` to see it
+   scored against RPO, then `restore_backup` (first without `confirm`, to
+   see the plan, then with `confirm=true`) to actually restore it.
 
 ## CI
 

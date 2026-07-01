@@ -1,0 +1,57 @@
+name: velero
+framework: fastmcp-python
+version: 0.1.0
+description: VELERO BACKUP
+secrets:
+    local:
+        enabled: false
+        provider: env
+        file: .env.local
+    production:
+        enabled: false
+        provider: kubernetes
+        secretName: velero-secrets-production
+        namespace: default
+    staging:
+        enabled: false
+        provider: kubernetes
+        secretName: velero-secrets-staging
+        namespace: default
+created_at: 2026-07-01T17:37:41.577423294-03:00
+updated_at: 2026-07-01T17:37:41.613419869-03:00
+kubernetes:
+    # Kubeconfig context to use when running out-of-cluster (dev mode, or the
+    # server deployed outside the cluster it manages). Empty = current-context.
+    context: ""
+tools:
+    trigger_backup:
+        name: trigger_backup
+        description: Trigger a Velero backup and record structured completion metadata
+        enabled: true
+        config:
+            velero_namespace: velero
+            poll_interval_seconds: 5
+    list_backups:
+        name: list_backups
+        description: List Velero backups scored against per-tier RPO policy
+        enabled: true
+        config:
+            velero_namespace: velero
+    restore_backup:
+        name: restore_backup
+        description: Restore from a picked Velero backup (advisory unless confirmed)
+        enabled: true
+        config:
+            velero_namespace: velero
+            poll_interval_seconds: 5
+policies:
+    default_tier: standard
+    tiers:
+        critical:
+            rpo_minutes: 60
+            rto_minutes: 15
+        standard:
+            rpo_minutes: 1440
+            rto_minutes: 240
+    # Map namespace -> tier name above. Namespaces not listed fall back to default_tier.
+    namespace_tiers: {}
