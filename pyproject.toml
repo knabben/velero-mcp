@@ -28,8 +28,8 @@ dev = "src.main:dev"
 dev-http = "src.main:dev"
 start = "src.main:start"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest==9.0.2",
     "pytest-asyncio==1.3.0",
     "black==26.1.0",
