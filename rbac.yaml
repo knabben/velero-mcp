@@ -1,0 +1,36 @@
+# kmcp already creates the ServiceAccount (kagent/velero) and a
+# ClusterRoleBinding (kagent-velero-access) pointing at a ClusterRole
+# named "velero" - it just doesn't know what permissions a custom tool
+# needs, so it leaves that ClusterRole for the tool author to define.
+# This is that ClusterRole.
+#
+# apply: kubectl apply -f rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: velero
+rules:
+  # trigger_backup / list_backups / restore_backup: manage Backup and
+  # Restore objects in the Velero namespace (namespace is enforced by the
+  # request path, not by this cluster-scoped role).
+  - apiGroups: ["velero.io"]
+    resources: ["backups"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["velero.io"]
+    resources: ["restores"]
+    verbs: ["get", "list", "watch", "create"]
+  # collect_workload_images: snapshot container images running in whatever
+  # namespaces a backup covers - namespaces aren't known in advance, so
+  # this is cluster-wide read-only.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # detect_gitops_revision: best-effort GitOps commit lookup (Flux/Argo CD).
+  # Missing CRDs are handled gracefully in code, so these are optional in
+  # practice - included so the feature works when either is present.
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch"]
