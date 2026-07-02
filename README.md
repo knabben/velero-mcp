@@ -44,6 +44,9 @@ src/
 └── main.py                 # Entry point
 kmcp.yaml                   # Configuration file
 tests/                      # Unit tests (mocked Kubernetes client, no cluster required)
+AGENT.md                    # kagent Agent system-prompt text (nothing else - see agent.yaml)
+agent.yaml                  # Deployable kagent Agent manifest (tools wiring, requireApproval)
+rbac.yaml                   # ClusterRole for the ServiceAccount kmcp creates for this MCPServer
 ```
 
 ## Configuration
@@ -182,12 +185,18 @@ ServiceAccount) that can reach it:
 
 1. Point `kmcp.yaml`'s `kubernetes.context` at the target cluster, or rely on
    `KUBECONFIG` / the current context.
-2. Grant the identity running the server RBAC for: create/get/patch on
-   `backups.velero.io` and `restores.velero.io` in the `velero_namespace`;
-   list/get on both across the namespace for `list_backups`; read on
-   Deployments/StatefulSets/DaemonSets in any namespace you'll back up; and
-   (optionally) read on `gitrepositories.source.toolkit.fluxcd.io` /
-   `applications.argoproj.io` if you want GitOps revision detection.
+2. Apply `rbac.yaml`: `kubectl apply -f rbac.yaml`. **This is required even
+   after `kmcp deploy` / the MCPServer reconciles** - kmcp's controller
+   creates the ServiceAccount (`<namespace>/<mcpserver-name>`) and a
+   ClusterRoleBinding pointing at a ClusterRole named after the MCPServer
+   (e.g. `velero`), but it doesn't know what permissions a custom tool
+   needs, so that ClusterRole doesn't exist until you define it. Without
+   this step every tool call fails with `403 Forbidden: ... clusterrole
+   "velero" not found`. `rbac.yaml` grants: create/get/patch on
+   `backups.velero.io`, create/get on `restores.velero.io`, cluster-wide
+   read on Deployments/StatefulSets/DaemonSets (namespaces aren't known in
+   advance), and read on the GitOps CRDs used for revision detection.
+   Verify with `kubectl auth can-i list backups.velero.io --as=system:serviceaccount:<ns>:<mcpserver-name>`.
 3. Call `trigger_backup` with `wait=true`, then `list_backups` to see it
    scored against RPO, then `restore_backup` (first without `confirm`, to
    see the plan, then with `confirm=true`) to actually restore it.
@@ -211,4 +220,21 @@ docker run -i velero:latest
 ```bash
 kmcp deploy mcp --apply
 kubectl get mcpserver velero
+kubectl apply -f rbac.yaml    # required - see End-to-end validation above
+```
+
+### kagent Agent
+
+`agent.yaml` deploys a kagent Agent wired to this MCPServer's three tools,
+with `requireApproval: [restore_backup]` as a second, independent
+enforcement of the advisory-only restore policy on top of the tool's own
+`confirm` gate. `AGENT.md` is the same system-prompt text embedded in
+`agent.yaml` - kept as a separate file for readability, not meant to be
+pasted into `systemMessage` wholesale (it has no wiring/YAML in it, unlike
+earlier drafts of this doc that mixed the two and caused the agent to
+deploy with zero tools registered).
+
+```bash
+kubectl apply -f agent.yaml -n kagent
+kubectl get agent velero-agent -n kagent
 ```
