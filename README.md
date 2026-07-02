@@ -6,6 +6,16 @@ promise into a measured, continuously-verified fact - full autonomy on the
 safe side (triggering backups, scoring them against policy), advisory-only
 on the destructive side (restoring).
 
+## Demo
+
+[When Clusters Break](https://www.youtube.com/watch?v=Cw_gez2_YO4) - this
+MCP server's `trigger_backup`/`list_backups`/`restore_backup` tools in
+context: a CAPI management-cluster failure demo, where the agent has full
+autonomy proving the RTO/RPO numbers before anything breaks, then switches
+to advisory-only once the failure is simulated. See
+[docs/companion-guide.md](docs/companion-guide.md) for the write-up behind
+the talk.
+
 ## Tools
 
 - **`trigger_backup`**: creates a `velero.io/v1` Backup object (the same
